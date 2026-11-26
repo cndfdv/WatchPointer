@@ -22,14 +22,10 @@ struct PadGesture<ContactID: Hashable> {
         let start: CGPoint
         var end: CGPoint
 
-        var direction: Direction? {
-            let dx = end.x - start.x
-            let dy = end.y - start.y
-            if abs(dx) >= 24, abs(dx) >= 1.5 * abs(dy) { return dx > 0 ? .right : .left }
-            if dy <= -24, -dy >= 1.5 * abs(dx) { return .up }
-            return nil
-        }
+        var travel: CGVector { CGVector(dx: end.x - start.x, dy: end.y - start.y) }
     }
+
+    private static var movementThreshold: CGFloat { 8 }
 
     private var contacts: [ContactID: Contact] = [:]
     private var moved = false
@@ -45,7 +41,7 @@ struct PadGesture<ContactID: Hashable> {
         var contact = contacts[id] ?? Contact(start: location, end: location)
         contact.end = location
         contacts[id] = contact
-        moved = moved || hypot(location.x - contact.start.x, location.y - contact.start.y) >= 8
+        moved = moved || hypot(contact.travel.dx, contact.travel.dy) >= Self.movementThreshold
     }
 
     mutating func recordOverlap() { overlapped = true }
@@ -72,10 +68,7 @@ struct PadGesture<ContactID: Hashable> {
         }
         guard !cancelled else { return nil }
         if contacts.count == 1, !moved { return .click }
-        guard let direction = contacts.values.first?.direction else { return nil }
-        if contacts.count == 2 {
-            guard overlapped, contacts.values.allSatisfy({ $0.direction == direction }) else { return nil }
-        }
+        guard let direction = swipeDirection() else { return nil }
         switch (contacts.count, direction) {
         case (1, .left): return .swipe(.browserTabNext)
         case (1, .right): return .swipe(.browserTabPrevious)
@@ -84,5 +77,31 @@ struct PadGesture<ContactID: Hashable> {
         case (2, .up): return .swipe(.missionControl)
         default: return nil
         }
+    }
+
+    private func swipeDirection() -> Direction? {
+        let strokes = contacts.values.map(\.travel)
+        switch strokes.count {
+        case 1:
+            return Self.direction(of: strokes[0], minimumDistance: 24)
+        case 2 where overlapped:
+            // The second finger can touch down later and cover less distance.
+            let center = CGVector(dx: (strokes[0].dx + strokes[1].dx) / 2,
+                                  dy: (strokes[0].dy + strokes[1].dy) / 2)
+            guard let direction = Self.direction(of: center, minimumDistance: 24),
+                  strokes.allSatisfy({
+                      Self.direction(of: $0, minimumDistance: Self.movementThreshold) == direction
+                  }) else { return nil }
+            return direction
+        default:
+            return nil
+        }
+    }
+
+    private static func direction(of travel: CGVector, minimumDistance: CGFloat) -> Direction? {
+        let (dx, dy) = (travel.dx, travel.dy)
+        if abs(dx) >= minimumDistance, abs(dx) >= 1.5 * abs(dy) { return dx > 0 ? .right : .left }
+        if dy <= -minimumDistance, -dy >= 1.5 * abs(dx) { return .up }
+        return nil
     }
 }

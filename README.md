@@ -80,7 +80,7 @@ The standard build checks the encrypted Bluetooth link before sending a swipe or
 
 - Swipe **left with one finger** for the next tab or **right** for the previous tab in a supported browser, such as Chrome or Safari.
 - Swipe **left with two fingers** for the next Space or **right** for the previous Space. Spaces include desktops and full-screen windows.
-- Swipe **up with two fingers** to open Mission Control. Point at a window and tap the pad to select it. For two-finger gestures, put both fingers on the pad and move them together.
+- Swipe **up with two fingers** to open Mission Control. Point at a window and tap the pad to select it. If a two-finger swipe switches a browser tab instead, place both fingertips on the pad before moving them together.
 - In **Remote actions**, choose **Dictate** and use the microphone on the system text-entry screen. Review the draft, click an editable text field on your Mac, and choose **Send** on the watch. Long drafts can be sent in shorter parts. WatchPointer sends the approved text over Bluetooth. System dictation follows the watch's language and dictation settings.
 
 #### Local builds for Bluetooth pairing problems
