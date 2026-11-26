@@ -40,6 +40,11 @@ struct RemoteActionsView: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    if pointer.connected {
+                        Text("Swipe up or down with one finger to scroll.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     if pointer.supportsRemoteInput {
                         Text("On the pad, swipe sideways with one finger for tabs or two fingers for Spaces. Swipe up with two fingers for Mission Control.")
                             .font(.footnote)

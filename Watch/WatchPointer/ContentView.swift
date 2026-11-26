@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Mac scroll distance, in pixels, per unit of Crown turn. Higher = faster scrolling.
 private let crownPixels = 100.0
+/// Mac scroll distance in pixels per point of vertical travel on the watch pad.
+private let swipeScrollScale = 4.0
 
 /// A remote you use without looking: one big pad, three buttons in fixed places, haptics for feedback.
 struct ContentView: View {
@@ -310,6 +312,8 @@ private struct ClickPad: View {
             pointer.send(.leftClick, at: touchDown)
         case .drop:
             pointer.send(.drag, 0, at: ProcessInfo.processInfo.systemUptime - 0.05)
+        case let .scroll(distance):
+            pointer.scroll(by: Double(distance) * swipeScrollScale)
         case let .swipe(command):
             swipe(command)
         case nil:

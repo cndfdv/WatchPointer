@@ -74,6 +74,8 @@ Hold the watch like a remote with the top edge (12 o'clock) toward the screen. P
 
 ### 4. Swipe and dictate
 
+Swipe up or down with one finger on the watch pad to scroll under the Mac pointer. The scroll distance follows the length of the swipe. The Digital Crown also scrolls.
+
 Update both apps. In the Mac menu, choose **Pair Watch Input…**. On the watch, open **Remote actions** using the ellipsis button, choose **Pair Watch Input**, and enter the six-digit code shown on the Mac. If macOS or watchOS asks to confirm Bluetooth pairing, follow the system prompt. To revoke this permission, choose **Forget Watch Input** on the Mac.
 
 The standard build checks the encrypted Bluetooth link before sending a swipe or dictation command for the first time on a connection. If the watch reports a Bluetooth pairing problem while the pointer still moves, open **Pair Watch Input** and confirm any system Bluetooth prompt before retrying.

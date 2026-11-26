@@ -13,10 +13,11 @@ struct PadGesture<ContactID: Hashable> {
     enum Outcome: Equatable {
         case click
         case drop
+        case scroll(CGFloat)
         case swipe(WatchInputCommand)
     }
 
-    private enum Direction { case left, right, up }
+    private enum Direction { case left, right, up, down }
 
     private struct Contact {
         let start: CGPoint
@@ -72,6 +73,7 @@ struct PadGesture<ContactID: Hashable> {
         switch (contacts.count, direction) {
         case (1, .left): return .swipe(.browserTabNext)
         case (1, .right): return .swipe(.browserTabPrevious)
+        case (1, .up), (1, .down): return contacts.values.first.map { .scroll($0.travel.dy) }
         case (2, .left): return .swipe(.spaceRight)
         case (2, .right): return .swipe(.spaceLeft)
         case (2, .up): return .swipe(.missionControl)
@@ -101,7 +103,7 @@ struct PadGesture<ContactID: Hashable> {
     private static func direction(of travel: CGVector, minimumDistance: CGFloat) -> Direction? {
         let (dx, dy) = (travel.dx, travel.dy)
         if abs(dx) >= minimumDistance, abs(dx) >= 1.5 * abs(dy) { return dx > 0 ? .right : .left }
-        if dy <= -minimumDistance, -dy >= 1.5 * abs(dx) { return .up }
+        if abs(dy) >= minimumDistance, abs(dy) >= 1.5 * abs(dx) { return dy < 0 ? .up : .down }
         return nil
     }
 }

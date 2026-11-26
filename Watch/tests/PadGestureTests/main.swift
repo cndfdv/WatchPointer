@@ -28,11 +28,19 @@ for direction in [-1.0, 1.0] {
     precondition(swipe.finish() == nil, "A completed gesture must send only one command")
 }
 
-for end in [point(14, -40), point(14, 40), point(28, 30), point(24)] {
+for distance: CGFloat in [-40, 40] {
+    var scroll = PadGesture<Int>()
+    scroll.record(1, at: point(50, 60), active: true)
+    scroll.record(1, at: point(53, 60 + distance), active: false)
+    precondition(scroll.finish() == .scroll(distance), "A vertical swipe must scroll in the swipe direction")
+    precondition(scroll.finish() == nil, "A scroll swipe must send only one event")
+}
+
+for end in [point(14, -18), point(14, 18), point(40, -30), point(40, 30), point(24)] {
     var invalid = PadGesture<Int>()
     invalid.record(1, at: point(10), active: true)
     invalid.record(1, at: end, active: false)
-    precondition(invalid.finish() == nil, "A vertical, diagonal or short swipe must not trigger a tab or click")
+    precondition(invalid.finish() == nil, "A diagonal or short swipe must not trigger scroll, a tab or a click")
 }
 
 func pair(first: CGPoint, second: CGPoint, overlap: Bool = true) -> PadGesture<Int> {
