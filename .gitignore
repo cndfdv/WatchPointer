@@ -1,0 +1,20 @@
+.DS_Store
+
+# Local plans, signing and input provisioning
+/.local/
+/.plans/
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.p8
+
+# Swift Package Manager
+Mac/.build/
+Mac/.swiftpm/
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcuserstate
+*.app/
+*.xcarchive/

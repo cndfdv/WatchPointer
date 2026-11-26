@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WatchPointer Tab Fixture</title>
+<p id="tab"></p>
+<script>
+  const tab = new URLSearchParams(location.search).get("tab");
+  if (!/^[123]$/.test(tab || "")) throw new Error("Use ?tab=1, ?tab=2, or ?tab=3");
+  document.title = `WatchPointer Tab Fixture · Tab ${tab}`;
+  document.querySelector("#tab").textContent = `WatchPointer Tab Fixture · Tab ${tab}`;
+</script>
