@@ -1,4 +1,5 @@
 import SwiftUI
+import WatchKit
 
 /// Mac scroll distance, in pixels, per unit of Crown turn. Higher = faster scrolling.
 private let crownPixels = 100.0
@@ -16,6 +17,8 @@ struct ContentView: View {
     @State private var unpairTitle = ""
     @State private var showActions = false
     @State private var draft = ""
+    @State private var draftNeedsDeliveryCheck = false
+    @State private var dictationID: UUID?
     @State private var feedback: InputFeedback?
 
     var body: some View {
@@ -30,6 +33,7 @@ struct ContentView: View {
                                 Image(systemName: "ellipsis.circle")
                             }
                             .accessibilityLabel("Remote actions")
+                            .disabled(dictationID != nil)
                         }
                     }
                     if pointer.connected {
@@ -39,11 +43,13 @@ struct ContentView: View {
                                 unpairTitle = pointer.pairedName ?? "Mac" // fixed while the dialog is up
                                 confirmUnpair = true
                             } label: { Image(systemName: "laptopcomputer") }
+                            .disabled(dictationID != nil)
                         }
                     }
                 }
                 .sheet(isPresented: $showActions, onDismiss: { crownFocused = true }) {
-                    RemoteActionsView(pointer: pointer, draft: $draft, feedback: $feedback)
+                    RemoteActionsView(pointer: pointer, draft: $draft,
+                                      draftNeedsDeliveryCheck: $draftNeedsDeliveryCheck, feedback: $feedback)
                 }
                 .confirmationDialog(unpairTitle, isPresented: $confirmUnpair, titleVisibility: .visible) {
                     Button("Unpair", role: .destructive) {
@@ -60,6 +66,7 @@ struct ContentView: View {
                 VStack(spacing: 6) {
                     ClickPad(paused: pointer.paused, clicks: $clicks, pointer: pointer, swipe: sendSwipe)
                         .frame(maxHeight: .infinity)
+                        .overlay(alignment: .topTrailing) { microphone }
                         .overlay(alignment: .bottom) {
                             if let feedback, !showActions {
                                 Text(feedback.message)
@@ -120,6 +127,78 @@ struct ContentView: View {
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled, !showActions, self.feedback == feedback else { return }
             self.feedback = nil
+        }
+    }
+
+    private var microphone: some View {
+        PadButton(symbol: dictationID == nil ? "mic" : "mic.fill", action: startDictation)
+            .frame(width: 44, height: 44)
+            .padding(4)
+            .accessibilityLabel(draft.isEmpty ? "Dictate to Mac" : "Review dictation draft")
+            .accessibilityValue(dictationID == nil ? "" : "Opening text input")
+            .disabled(dictationID != nil || pointer.remoteInputBusy)
+    }
+
+    private func startDictation() {
+        guard dictationID == nil, !pointer.remoteInputBusy else { return }
+        // Resolve an unsent draft before taking new dictation.
+        guard draft.isEmpty else {
+            showActions = true
+            return
+        }
+
+        let id = UUID()
+        let connectionID = pointer.connectionID
+        dictationID = id
+        feedback = nil
+        pointer.beginDictation(id) { result in
+            guard dictationID == id else { return }
+            if case let .failure(error) = result {
+                dictationID = nil
+                feedback = InputFeedback(.failure(error), success: "Text sent")
+                if !pointer.connected { showActions = true }
+                return
+            }
+            guard let controller = WKApplication.shared().visibleInterfaceController else {
+                dictationID = nil
+                pointer.cancelDictation(id)
+                feedback = InputFeedback(.failure(.textInputUnavailable), success: "Text sent")
+                showActions = true
+                return
+            }
+
+            controller.presentTextInputController(withSuggestions: nil, allowedInputMode: .plain) { results in
+                let text = results?.first as? String
+                completeDictation(id, connectionID: connectionID, text: text)
+            }
+        }
+    }
+
+    private func completeDictation(_ id: UUID, connectionID: UUID, text: String?) {
+        guard dictationID == id else { return }
+        dictationID = nil
+        crownFocused = true
+        let sameConnection = pointer.connectionID == connectionID && pointer.connected
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            if sameConnection { pointer.cancelDictation(id) }
+            return
+        }
+
+        guard sameConnection else {
+            draft = text
+            feedback = InputFeedback(.failure(.staleTextField), success: "Text sent")
+            showActions = true
+            return
+        }
+
+        pointer.finishDictation(id, text: text) { result in
+            if case .failure = result {
+                draft = text
+                if case .failure(.deliveryUnconfirmed) = result { draftNeedsDeliveryCheck = true }
+                if pointer.connectionID == connectionID { pointer.cancelDictation(id) }
+                if !pointer.connected { showActions = true }
+            }
+            feedback = InputFeedback(result, success: "Text sent")
         }
     }
 

@@ -23,10 +23,20 @@ private func setting(_ name: String) -> Double? {
 let speed = arguments.lazy.compactMap(Double.init).first ?? 1.0
 /// How far you turn from the middle to reach the left/right edge. Up/down uses the same scale.
 let reachDegrees = 25.0 / speed
-/// Smoothing when the hand is nearly still, in Hz. Lower = steadier, but slow moves trail a little.
-let steadyCutoff = setting("steady") ?? 0.8
-/// How quickly smoothing gets out of the way as the hand speeds up. Higher = less lag on fast moves, a bit more shake.
-let quickness = setting("quick") ?? 0.01
+private let steadyOverride = setting("steady").flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+private let quickOverride = setting("quick").flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+
+enum PointerSmoothing: String, CaseIterable {
+    case balanced, classic
+
+    static let preferenceKey = "pointerSmoothing"
+
+    var title: String { self == .balanced ? "Balanced" : "Classic" }
+    /// Base cutoff in Hz for a hand held still.
+    var steady: Double { self == .balanced ? 0.56 : 0.8 }
+    /// How quickly the cutoff increases during intentional motion.
+    var quick: Double { self == .balanced ? 0.0135 : 0.01 }
+}
 
 /// Tapping the watch jolts it, so clicks land where the pointer was at the moment the thumb touched down
 /// (the watch sends that time). Older watch builds don't, so then it's this long before the click arrived.
@@ -45,9 +55,8 @@ enum Kind: UInt8 { case aim = 0, leftClick = 1, rightClick = 2, scroll = 3, cent
 /// almost none when it moves fast (no lag). The standard choice for pointing devices.
 /// Needs the real time between samples; feeding it bursty arrival times makes it shake and lag.
 struct OneEuroFilter {
-    var minCutoff = steadyCutoff
-    var beta = quickness
-    var derivativeCutoff = 1.0
+    var smoothing: PointerSmoothing = .balanced
+    private let derivativeCutoff = 1.0
     private var value: Double?
     private var velocity = 0.0
 
@@ -55,7 +64,8 @@ struct OneEuroFilter {
         guard let previous = value, dt > 0 else { value = x; return x }
         func alpha(_ cutoff: Double) -> Double { 1 / (1 + 1 / (2 * .pi * cutoff * dt)) }
         velocity += alpha(derivativeCutoff) * ((x - previous) / dt - velocity)
-        let smoothed = previous + alpha(minCutoff + beta * abs(velocity)) * (x - previous)
+        let cutoff = (steadyOverride ?? smoothing.steady) + (quickOverride ?? smoothing.quick) * abs(velocity)
+        let smoothed = previous + alpha(cutoff) * (x - previous)
         value = smoothed
         return smoothed
     }
@@ -72,6 +82,8 @@ final class Receiver: NSObject, CBPeripheralManagerDelegate {
     private var manager: CBPeripheralManager!
     private var askedForLowLatency = false
     private var keyboardBusy = false
+    private var dictationGeneration = UUID() // pointer queue
+    private var dictation = FocusedDictationSession<RemoteKeyboard.DictationTarget>() // keyboard queue
     private let localInputCipher = LocalInputCipher.provisioned()
     private var localInputChallenges = LocalInputChallenges()
     private static let pairedCentralKey = "watchInputPairedCentral"
@@ -97,11 +109,20 @@ final class Receiver: NSObject, CBPeripheralManagerDelegate {
     private var history: [(time: Double, point: CGPoint)] = [] // where the cursor was, last ~1 s
     private var dragging = false
 
-    init(live: Live) {
+    init(live: Live, smoothing: PointerSmoothing = .balanced) {
         self.live = live
         super.init()
+        filterX.smoothing = smoothing
+        filterY.smoothing = smoothing
         manager = CBPeripheralManager(delegate: self, queue: queue)
         queue.async { self.startFrameLoop() }
+    }
+
+    func setPointerSmoothing(_ smoothing: PointerSmoothing) {
+        queue.async { [self] in
+            filterX.smoothing = smoothing
+            filterY.smoothing = smoothing
+        }
     }
 
     var watchInputPaired: Bool {
@@ -111,6 +132,7 @@ final class Receiver: NSObject, CBPeripheralManagerDelegate {
     func beginWatchInputPairing() -> String {
         queue.sync {
             let code = String(format: "%06d", Int.random(in: 0..<1_000_000))
+            invalidateDictation()
             remoteInput.beginPairing(code: code, now: ProcessInfo.processInfo.systemUptime)
             return code
         }
@@ -119,6 +141,7 @@ final class Receiver: NSObject, CBPeripheralManagerDelegate {
     func forgetWatchInput() {
         queue.sync {
             remoteInput.forget()
+            invalidateDictation()
             UserDefaults.standard.removeObject(forKey: Self.pairedCentralKey)
         }
     }
@@ -127,6 +150,7 @@ final class Receiver: NSObject, CBPeripheralManagerDelegate {
         queue.sync {
             frameTimer?.cancel()
             manager.delegate = nil
+            invalidateDictation()
             if manager.state == .poweredOn {
                 manager.stopAdvertising()
             }
@@ -151,6 +175,7 @@ final class Receiver: NSObject, CBPeripheralManagerDelegate {
 
     func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         localInputChallenges = LocalInputChallenges()
+        invalidateDictation()
         guard peripheral.state == .poweredOn else {
             let status: Live.BluetoothStatus = switch peripheral.state {
             case .poweredOff: .off
@@ -200,6 +225,7 @@ final class Receiver: NSObject, CBPeripheralManagerDelegate {
     /// The watch's Bluetooth link closed (app quit, out of range, watch asleep long enough to drop it).
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
         localInputChallenges.remove(for: central.identifier)
+        if remoteInput.pairedCentral == central.identifier { invalidateDictation() }
         drop()
         watchInfo = nil
         ui { $0.watch = nil } // don't keep showing an old battery level or model
@@ -299,6 +325,7 @@ final class Receiver: NSObject, CBPeripheralManagerDelegate {
 
         switch remoteInput.authorize(packet, from: central, now: now) {
         case .paired:
+            invalidateDictation()
             UserDefaults.standard.set(central.uuidString, forKey: Self.pairedCentralKey)
             return .success
         case .invalidCode: return .invalidPdu
@@ -311,18 +338,27 @@ final class Receiver: NSObject, CBPeripheralManagerDelegate {
         }
     }
 
+    private func invalidateDictation() {
+        dictationGeneration = UUID()
+        keyboardQueue.async { [self] in dictation = FocusedDictationSession() }
+    }
+
     private func postRemoteInput(_ packet: RemoteInputPacket, from central: UUID,
                                  request: CBATTRequest, peripheral: CBPeripheralManager) {
         // Accessibility calls wait on another app. Keep them off the pointer sampling queue.
+        let generation = dictationGeneration
         keyboardQueue.async { [self] in
-            let result = RemoteKeyboard.perform(packet) {
-                queue.sync { manager.delegate != nil && remoteInput.pairedCentral == central }
+            let result = RemoteKeyboard.perform(packet, dictation: &dictation) {
+                queue.sync {
+                    manager.delegate != nil && remoteInput.pairedCentral == central
+                        && dictationGeneration == generation
+                }
             }
             let status: CBATTError.Code = switch result {
             case .accepted: .success
             case .permissionDenied: .writeNotPermitted
             case .unavailable: .unlikelyError
-            case .historyUnavailable: .attributeNotFound
+            case .historyUnavailable, .focusLost: .attributeNotFound
             case .revoked: .insufficientAuthorization
             }
             queue.async { [self] in

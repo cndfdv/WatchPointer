@@ -6,7 +6,7 @@ WatchPointer turns your Apple Watch into a Bluetooth remote for your Mac. Point 
 
 The watch talks directly to your Mac over Bluetooth. WatchPointer runs without a server.
 
-**1.2.0 source preview.** The Mac build and Chrome tab switching have been tested. Two-finger gestures and Mission Control window selection still need a physical Series 11 check on this version.
+**1.3.0 development build.** Chrome tab switching and Mission Control window selection were confirmed on Series 11 with 1.2.0. The integrated 1.3.0 build needs a physical check of Spaces, one-finger scrolling, and direct dictation.
 
 <p align="center">
   <img src="docs/demo.webp" width="320" alt="Holding an Apple Watch like a remote and pointing it at a MacBook to move the cursor">
@@ -18,7 +18,7 @@ The watch talks directly to your Mac over Bluetooth. WatchPointer runs without a
 - **Tap** the pad to click, **hold** to drag, **right-click** button, **Digital Crown** to scroll.
 - **Center** re-aims the middle of the screen; **Pause** frees the cursor for your trackpad.
 - **Swipe** on the watch pad to switch browser tabs or macOS Spaces, or to open Mission Control.
-- **Dictate** on the watch, review the draft, and send it to a focused text field on the Mac.
+- **Dictate** from the microphone on the main watch screen. Confirm the text to insert it into the original Mac field.
 - **Pair** with a Mac once; the watch only connects to that Mac until you unpair it.
 - **Menu bar** on the Mac: check the connection, open permission settings, and quit WatchPointer.
 - **Notch panel** on the Mac: connection state, the watch's name and model, battery, live aim, and a pin to keep it open.
@@ -81,9 +81,10 @@ Update both apps. In the Mac menu, choose **Pair Watch Input…**. On the watch,
 The standard build checks the encrypted Bluetooth link before sending a swipe or dictation command for the first time on a connection. If the watch reports a Bluetooth pairing problem while the pointer still moves, open **Pair Watch Input** and confirm any system Bluetooth prompt before retrying.
 
 - Swipe **left with one finger** for the next tab or **right** for the previous tab in a supported browser, such as Chrome or Safari.
-- Swipe **left with two fingers** for the next Space or **right** for the previous Space. Spaces include desktops and full-screen windows.
+- Swipe **left with two fingers** for the next Space or **right** for the previous Space. Spaces include desktops and full-screen windows. This uses macOS’s Control–arrow shortcuts.
 - Swipe **up with two fingers** to open Mission Control. Point at a window and tap the pad to select it. If a two-finger swipe switches a browser tab instead, place both fingertips on the pad before moving them together.
-- In **Remote actions**, choose **Dictate** and use the microphone on the system text-entry screen. Review the draft, click an editable text field on your Mac, and choose **Send** on the watch. Long drafts can be sent in shorter parts. WatchPointer sends the approved text over Bluetooth. System dictation follows the watch's language and dictation settings.
+- Click a text field on the Mac, then tap the **microphone** on the watch pad. Use the watch's system text input and confirm. WatchPointer inserts the result into the field it captured before dictation if that same field is still focused. The session lasts two minutes.
+- Open **Remote actions** to review an unsent draft. Check the Mac before retrying a draft whose delivery could not be confirmed. For fields that support keyboard input without exposing text insertion to Accessibility, choose **Dictate**, focus the field on your Mac and choose **Send**. System dictation follows the watch's language and dictation settings.
 
 #### Local builds for Bluetooth pairing problems
 
@@ -98,12 +99,12 @@ With your Apple Development signing identity available in Xcode, run `./build-lo
 
 ## Settings
 
-The Finder app uses the defaults. To try different values, quit it and run the receiver from `Mac/` with command-line options:
+To change smoothing, open **Pointer Smoothing** in the Mac menu. **Balanced** is tuned for a steadier resting cursor. **Classic** uses the 1.2.0 filter settings. For finer tuning, quit the app and run the receiver from `Mac/` with command-line overrides:
 
 ```bash
 swift run WatchPointer 1.2               # speed: higher = less turn to reach the edges
-swift run WatchPointer steady=0.6        # steadier when holding still (default 0.8)
-swift run WatchPointer quick=0.02        # less lag on fast moves (default 0.01)
+swift run WatchPointer steady=0.6        # filter cutoff when holding still (Balanced: 0.56)
+swift run WatchPointer quick=0.02        # less lag on fast moves (Balanced: 0.0135)
 ```
 
 ## Sky Shot

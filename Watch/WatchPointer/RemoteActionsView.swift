@@ -20,6 +20,7 @@ struct InputFeedback: Equatable {
 struct RemoteActionsView: View {
     @ObservedObject var pointer: Pointer
     @Binding var draft: String
+    @Binding var draftNeedsDeliveryCheck: Bool
     @Binding var feedback: InputFeedback?
     @Environment(\.dismiss) private var dismiss
 
@@ -54,6 +55,7 @@ struct RemoteActionsView: View {
                     TextFieldLink(prompt: Text("Dictate or enter text")) {
                         Label(draft.isEmpty ? "Dictate" : "Replace draft", systemImage: "mic")
                     } onSubmit: { text in
+                        if draft != text { draftNeedsDeliveryCheck = false }
                         draft = text
                         feedback = nil
                     }
@@ -71,7 +73,17 @@ struct RemoteActionsView: View {
                         Text("Focus a text field on the Mac before sending.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                        if pointer.supportsRemoteInput, draft.utf8.count > pointer.dictationByteLimit {
+                        if draftNeedsDeliveryCheck, feedback?.message != WatchInputError.deliveryUnconfirmed.message {
+                            Text(WatchInputError.deliveryUnconfirmed.message)
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
+                        }
+                        if WatchDictation.textPayload(draft) == nil {
+                            Text("Replace the draft with a line of plain text.")
+                                .font(.footnote)
+                                .foregroundStyle(.orange)
+                        } else if pointer.supportsRemoteInput, let bytes = WatchDictation.textPayload(draft),
+                                  bytes.count > pointer.dictationByteLimit {
                             Text("The draft exceeds the \(pointer.dictationByteLimit)-byte limit.")
                                 .font(.footnote)
                                 .foregroundStyle(.orange)
@@ -80,11 +92,25 @@ struct RemoteActionsView: View {
                         Button("Send") {
                             let text = draft
                             pointer.sendDictation(text) { result in
-                                if case .success = result, draft == text { draft = "" }
+                                if draft == text {
+                                    if case .success = result {
+                                        draft = ""
+                                        draftNeedsDeliveryCheck = false
+                                    } else if case .failure(.deliveryUnconfirmed) = result {
+                                        draftNeedsDeliveryCheck = true
+                                    }
+                                }
                                 feedback = InputFeedback(result, success: "Text sent")
                             }
                         }
                         .disabled(!canSend)
+
+                        Button("Discard draft", role: .destructive) {
+                            draft = ""
+                            draftNeedsDeliveryCheck = false
+                            feedback = nil
+                        }
+                        .disabled(pointer.remoteInputBusy)
                     }
 
                     if pointer.supportsRemoteInput {
@@ -113,7 +139,8 @@ struct RemoteActionsView: View {
     }
 
     private var canSend: Bool {
-        pointer.connected && pointer.supportsRemoteInput && !pointer.remoteInputBusy
-            && draft.utf8.count <= pointer.dictationByteLimit
+        guard pointer.connected, pointer.supportsRemoteInput, !pointer.remoteInputBusy,
+              let bytes = WatchDictation.textPayload(draft) else { return false }
+        return bytes.count <= pointer.dictationByteLimit
     }
 }

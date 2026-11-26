@@ -44,3 +44,40 @@ struct WatchInputExchange {
         if invalidateRead { checkedRead = false }
     }
 }
+
+enum WatchDictation {
+    enum Kind: UInt8 {
+        case manual = 6, begin = 10, finish = 11, cancel = 12
+
+        var insertsText: Bool { self == .manual || self == .finish }
+    }
+
+    static func manual(_ text: String) -> Data? {
+        textPayload(text).map { Data([Kind.manual.rawValue]) + $0 }
+    }
+
+    static func begin(_ id: UUID) -> Data {
+        sessionHeader(.begin, id: id)
+    }
+
+    static func finish(_ id: UUID, text: String) -> Data? {
+        textPayload(text).map { sessionHeader(.finish, id: id) + $0 }
+    }
+
+    static func cancel(_ id: UUID) -> Data {
+        sessionHeader(.cancel, id: id)
+    }
+
+    private static func sessionHeader(_ kind: Kind, id: UUID) -> Data {
+        withUnsafeBytes(of: id.uuid) { Data([kind.rawValue]) + Data($0) }
+    }
+
+    static func textPayload(_ text: String) -> Data? {
+        let singleLine = text.components(separatedBy: .newlines).joined(separator: " ")
+        guard !singleLine.trimmingCharacters(in: .whitespaces).isEmpty,
+              !singleLine.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else {
+            return nil
+        }
+        return Data(singleLine.utf8)
+    }
+}

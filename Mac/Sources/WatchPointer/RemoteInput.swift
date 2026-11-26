@@ -27,6 +27,7 @@ struct RemoteInputFragment {
 enum RemoteInputPacket: Equatable {
     case pair(String), browserBack, browserForward, spaceLeft, spaceRight, text(String)
     case browserTabPrevious, browserTabNext, missionControl
+    case dictationBegin(UUID), dictationFinish(UUID, String), dictationCancel(UUID)
 
     static let maximumLength = 512
 
@@ -41,20 +42,38 @@ enum RemoteInputPacket: Equatable {
         case 4 where payload.isEmpty: self = .spaceLeft
         case 5 where payload.isEmpty: self = .spaceRight
         case 6:
-            guard !payload.isEmpty, let text = String(data: payload, encoding: .utf8),
-                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !text.unicodeScalars.contains(where: {
-                      switch $0.properties.generalCategory {
-                      case .control, .lineSeparator, .paragraphSeparator: true
-                      default: false
-                      }
-                  }) else { return nil }
+            guard let text = Self.validText(payload) else { return nil }
             self = .text(text)
         case 7 where payload.isEmpty: self = .browserTabPrevious
         case 8 where payload.isEmpty: self = .browserTabNext
         case 9 where payload.isEmpty: self = .missionControl
+        case 10 where payload.count == 16:
+            self = .dictationBegin(Self.dictationID(payload))
+        case 11 where payload.count > 16:
+            guard let text = Self.validText(payload.dropFirst(16)) else { return nil }
+            self = .dictationFinish(Self.dictationID(payload), text)
+        case 12 where payload.count == 16:
+            self = .dictationCancel(Self.dictationID(payload))
         default: return nil
         }
+    }
+
+    private static func dictationID(_ payload: Data) -> UUID {
+        let bytes = Array(payload.prefix(16))
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+
+    private static func validText(_ payload: Data) -> String? {
+        guard !payload.isEmpty, let text = String(data: payload, encoding: .utf8),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !text.unicodeScalars.contains(where: {
+                  switch $0.properties.generalCategory {
+                  case .control, .lineSeparator, .paragraphSeparator: true
+                  default: false
+                  }
+              }) else { return nil }
+        return text
     }
 
     static func assemble(_ fragments: [RemoteInputFragment]) -> RemoteInputPacket? {
@@ -105,8 +124,42 @@ struct RemoteInputAuthorization {
     }
 }
 
+struct FocusedDictationSession<Target> {
+    private struct Capture {
+        let id: UUID
+        let target: Target
+        let expiresAt: TimeInterval
+    }
+
+    private var capture: Capture?
+
+    mutating func begin(_ id: UUID, target: Target, now: TimeInterval) {
+        capture = Capture(id: id, target: target, expiresAt: now + 120)
+    }
+
+    mutating func take(_ id: UUID, now: TimeInterval) -> Target? {
+        guard let active = capture else { return nil }
+        if now >= active.expiresAt {
+            capture = nil
+            return nil
+        }
+        guard active.id == id else { return nil }
+        capture = nil
+        return active.target
+    }
+
+    mutating func cancel(_ id: UUID) {
+        if capture?.id == id { capture = nil }
+    }
+}
+
 enum RemoteKeyboard {
-    enum Result { case accepted, permissionDenied, unavailable, historyUnavailable, revoked }
+    enum Result { case accepted, permissionDenied, unavailable, historyUnavailable, focusLost, revoked }
+
+    struct DictationTarget {
+        let application: NSRunningApplication
+        let element: AXUIElement
+    }
 
     private static let missionControl = URL(fileURLWithPath: "/System/Applications/Mission Control.app")
     private static let browsers: Set<String> = [
@@ -114,15 +167,38 @@ enum RemoteKeyboard {
         "com.microsoft.edgemac", "com.brave.Browser", "company.thebrowser.Browser", "com.vivaldi.Vivaldi",
     ]
 
+    static func perform(_ packet: RemoteInputPacket, dictation: inout FocusedDictationSession<DictationTarget>,
+                        stillAuthorized: () -> Bool) -> Result {
+        guard stillAuthorized() else { return .revoked }
+        switch packet {
+        case .dictationCancel(let id):
+            dictation.cancel(id)
+            return .accepted
+        case .dictationBegin(let id):
+            dictation = FocusedDictationSession()
+            guard AXIsProcessTrusted() else { return .permissionDenied }
+            guard let target = focusedDictationTarget() else { return .unavailable }
+            guard stillAuthorized() else { return .revoked }
+            dictation.begin(id, target: target, now: ProcessInfo.processInfo.systemUptime)
+            return .accepted
+        case .dictationFinish(let id, let text):
+            guard let target = dictation.take(id, now: ProcessInfo.processInfo.systemUptime)
+            else { return .focusLost }
+            return insertDictation(text, into: target, stillAuthorized: stillAuthorized)
+        default:
+            return perform(packet, stillAuthorized: stillAuthorized)
+        }
+    }
+
     static func perform(_ packet: RemoteInputPacket, stillAuthorized: () -> Bool) -> Result {
         guard stillAuthorized() else { return .revoked }
         guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else { return .permissionDenied }
         switch packet {
-        case .pair: return .unavailable
+        case .pair, .dictationBegin, .dictationFinish, .dictationCancel: return .unavailable
         case .browserBack: return navigateHistory("[", stillAuthorized: stillAuthorized)
         case .browserForward: return navigateHistory("]", stillAuthorized: stillAuthorized)
-        case .spaceLeft: return shortcut(kVK_LeftArrow, .maskControl)
-        case .spaceRight: return shortcut(kVK_RightArrow, .maskControl)
+        case .spaceLeft: return SpacesNavigation.post(arrow: kVK_LeftArrow, stillAuthorized: stillAuthorized)
+        case .spaceRight: return SpacesNavigation.post(arrow: kVK_RightArrow, stillAuthorized: stillAuthorized)
         case .text(let text): return typeText(text, stillAuthorized: stillAuthorized)
         case .browserTabPrevious: return switchBrowserTab([.maskControl, .maskShift], stillAuthorized: stillAuthorized)
         case .browserTabNext: return switchBrowserTab(.maskControl, stillAuthorized: stillAuthorized)
@@ -170,15 +246,50 @@ enum RemoteKeyboard {
         return .accepted
     }
 
+    private static func focusedDictationTarget() -> DictationTarget? {
+        guard !IsSecureEventInputEnabled(),
+              let application = NSWorkspace.shared.frontmostApplication else { return nil }
+
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.3)
+        guard let element = focusedElement(in: system), isEditable(element),
+              isSettable(kAXSelectedTextAttribute, of: element) else { return nil }
+
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid > 0,
+              application.processIdentifier == pid,
+              let current = focusedElement(in: system), CFEqual(current, element),
+              NSWorkspace.shared.frontmostApplication == application else { return nil }
+        return DictationTarget(application: application, element: element)
+    }
+
+    private static func insertDictation(_ text: String, into target: DictationTarget,
+                                       stillAuthorized: () -> Bool) -> Result {
+        guard AXIsProcessTrusted() else { return .permissionDenied }
+        guard let current = focusedDictationTarget(),
+              current.application == target.application,
+              !target.application.isTerminated,
+              CFEqual(current.element, target.element) else { return .focusLost }
+        guard stillAuthorized() else { return .revoked }
+
+        // Insert through the captured AX element so a late focus switch cannot redirect the text.
+        return AXUIElementSetAttributeValue(target.element, kAXSelectedTextAttribute as CFString, text as CFString)
+            == .success ? .accepted : .unavailable
+    }
+
+    private static func isEditable(_ field: AXUIElement) -> Bool {
+        guard let role = attribute(kAXRoleAttribute, of: field) as? String,
+              [kAXTextFieldRole, kAXTextAreaRole].contains(role),
+              (attribute(kAXSubroleAttribute, of: field) as? String) != kAXSecureTextFieldSubrole,
+              (attribute(kAXEnabledAttribute, of: field) as? Bool) != false else { return false }
+        return isSettable(kAXValueAttribute, of: field)
+    }
+
     private static func typeText(_ text: String, stillAuthorized: () -> Bool) -> Result {
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, 0.3)
         guard let field = focusedElement(in: system),
-              let role = attribute(kAXRoleAttribute, of: field) as? String,
-              [kAXTextFieldRole, kAXTextAreaRole].contains(role),
-              (attribute(kAXSubroleAttribute, of: field) as? String) != kAXSecureTextFieldSubrole,
-              (attribute(kAXEnabledAttribute, of: field) as? Bool) != false,
-              isSettable(kAXValueAttribute, of: field),
+              isEditable(field),
               let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
               let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
         else { return .unavailable }

@@ -60,6 +60,51 @@ final class RemoteInputTests: XCTestCase {
         XCTAssertNil(RemoteInputPacket(data: Data([6]) + Data("tab\tkey".utf8)))
     }
 
+    func testFocusedDictationFramesAndAuthorization() {
+        let id = UUID(uuidString: "00010203-0405-0607-0809-0A0B0C0D0E0F")!
+        let bytes = Data(0..<16)
+        let watch = UUID()
+        var paired = RemoteInputAuthorization(pairedCentral: watch)
+        for (frame, expected) in [
+            (Data([10]) + bytes, RemoteInputPacket.dictationBegin(id)),
+            (Data([11]) + bytes + Data("Привет".utf8), .dictationFinish(id, "Привет")),
+            (Data([12]) + bytes, .dictationCancel(id)),
+        ] {
+            XCTAssertEqual(RemoteInputPacket(data: frame), expected)
+            XCTAssertEqual(paired.authorize(expected, from: watch, now: 0), .allowed)
+            XCTAssertEqual(paired.authorize(expected, from: UUID(), now: 0), .unpaired)
+        }
+        XCTAssertNil(RemoteInputPacket(data: Data([10]) + bytes.dropLast()))
+        XCTAssertNil(RemoteInputPacket(data: Data([12]) + bytes + Data([0])))
+        XCTAssertNil(RemoteInputPacket(data: Data([11]) + bytes))
+        XCTAssertNil(RemoteInputPacket(data: Data([11]) + bytes + Data([0xFF])))
+        XCTAssertNil(RemoteInputPacket(data: Data([11]) + bytes + Data("a\u{2028}b".utf8)))
+        XCTAssertNotNil(RemoteInputPacket(data: Data([11]) + bytes + Data(repeating: 65, count: 495)))
+        XCTAssertNil(RemoteInputPacket(data: Data([11]) + bytes + Data(repeating: 65, count: 496)))
+    }
+
+    func testFocusedDictationSessionsRequireMatchingLiveTokenAndAreOneShot() {
+        let id = UUID(), unrelated = UUID()
+        var sessions = FocusedDictationSession<String>()
+        sessions.begin(id, target: "field", now: 10)
+        sessions.cancel(unrelated)
+        XCTAssertNil(sessions.take(unrelated, now: 20))
+        XCTAssertEqual(sessions.take(id, now: 20), "field")
+        XCTAssertNil(sessions.take(id, now: 21))
+
+        sessions.begin(id, target: "field", now: 30)
+        XCTAssertNil(sessions.take(id, now: 150))
+
+        sessions.begin(id, target: "field", now: 151)
+        sessions.cancel(id)
+        XCTAssertNil(sessions.take(id, now: 152))
+
+        sessions.begin(id, target: "field", now: 153)
+        sessions.begin(unrelated, target: "new field", now: 154)
+        XCTAssertNil(sessions.take(id, now: 155))
+        XCTAssertEqual(sessions.take(unrelated, now: 156), "new field")
+    }
+
     func testLongWriteReassemblesOnlyContiguousFragmentsFromOnePeer() {
         let watch = UUID(), characteristic = UUID()
         let payload = Data([6]) + Data("Привет".utf8)

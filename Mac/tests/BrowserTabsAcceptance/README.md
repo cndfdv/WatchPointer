@@ -8,7 +8,8 @@ This opt-in test sends real macOS accessibility actions to Chrome. Run it only w
 
    ```sh
    mkdir -p .local
-   swiftc Mac/Sources/WatchPointer/RemoteInput.swift Mac/tests/BrowserTabsAcceptance/main.swift -o .local/check-browser-tabs
+   swiftc Mac/Sources/WatchPointer/RemoteInput.swift Mac/Sources/WatchPointer/SpacesNavigation.swift \
+     Mac/tests/BrowserTabsAcceptance/main.swift -o .local/check-browser-tabs
    .local/check-browser-tabs
    ```
 

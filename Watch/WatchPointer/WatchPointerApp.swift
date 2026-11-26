@@ -14,7 +14,6 @@ private let localInputChallengeUUID = CBUUID(string: LocalInputCipher.challengeI
 private let localInputWriteUUID = CBUUID(string: LocalInputCipher.writeID.uuidString)
 private let remoteInputPacketLimit = 512
 private let remoteInputPairKind: UInt8 = 1
-private let remoteInputTextKind: UInt8 = 6
 
 @main
 struct WatchPointerApp: App {
@@ -33,7 +32,8 @@ enum Kind: UInt8 { case aim = 0, leftClick = 1, rightClick = 2, scroll = 3, cent
 
 enum WatchInputError: Error {
     case unavailable, disconnected, busy, tooLong, unauthorized, badCode, accessDenied
-    case needsTextField, needsBrowser, bluetoothPairing, localProvisioning, failed
+    case needsTextField, staleTextField, textInputUnavailable, invalidText, deliveryUnconfirmed, needsBrowser
+    case bluetoothPairing, localProvisioning, failed
 
     var message: String {
         switch self {
@@ -45,6 +45,10 @@ enum WatchInputError: Error {
         case .badCode: return "Enter the current six-digit code from the Mac app."
         case .accessDenied: return "Enable Accessibility for WatchPointer on your Mac."
         case .needsTextField: return "Select an editable text field on your Mac."
+        case .staleTextField: return "The original Mac field changed. Your draft is in Remote actions."
+        case .textInputUnavailable: return "Use Dictate below, then send your draft."
+        case .invalidText: return "Enter a line of plain text."
+        case .deliveryUnconfirmed: return "Check your Mac before resending the draft."
         case .needsBrowser: return "Switch to a supported browser on your Mac."
         case .bluetoothPairing: return "Open Pair Watch Input and confirm the system Bluetooth prompt."
         case .localProvisioning: return "Install matching locally provisioned WatchPointer apps on your Watch and Mac."
@@ -74,6 +78,7 @@ final class Pointer: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
     @Published var pairedName = UserDefaults.standard.string(forKey: "pairedMacName")
     private var pairedID = UserDefaults.standard.string(forKey: "pairedMacID").flatMap(UUID.init)
 
+    private(set) var connectionID = UUID()
     private var central: CBCentralManager!
     private var mac: CBPeripheral?
     private var input: CBCharacteristic?
@@ -220,25 +225,38 @@ final class Pointer: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
             completion(.failure(.badCode))
             return
         }
-        writeRemoteInput(kind: remoteInputPairKind, payload: Data(digits), completion: completion)
+        writeRemoteInput(Data([remoteInputPairKind]) + Data(digits), completion: completion)
     }
 
     func sendSwipe(_ command: WatchInputCommand, completion: @escaping (Result<Void, WatchInputError>) -> Void) {
-        writeRemoteInput(kind: command.rawValue, payload: Data(), completion: completion)
+        writeRemoteInput(Data([command.rawValue]), completion: completion)
     }
 
     func sendDictation(_ text: String, completion: @escaping (Result<Void, WatchInputError>) -> Void) {
-        let singleLine = text.components(separatedBy: .newlines).joined(separator: " ")
-        guard !singleLine.trimmingCharacters(in: .whitespaces).isEmpty,
-              !singleLine.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else {
-            completion(.failure(.failed))
+        guard let frame = WatchDictation.manual(text) else {
+            completion(.failure(.invalidText))
             return
         }
-        writeRemoteInput(kind: remoteInputTextKind, payload: Data(singleLine.utf8), completion: completion)
+        writeRemoteInput(frame, completion: completion)
     }
 
-    private func writeRemoteInput(kind: UInt8, payload: Data,
-                                  completion: @escaping (Result<Void, WatchInputError>) -> Void) {
+    func beginDictation(_ id: UUID, completion: @escaping (Result<Void, WatchInputError>) -> Void) {
+        writeRemoteInput(WatchDictation.begin(id), completion: completion)
+    }
+
+    func finishDictation(_ id: UUID, text: String, completion: @escaping (Result<Void, WatchInputError>) -> Void) {
+        guard let frame = WatchDictation.finish(id, text: text) else {
+            completion(.failure(.invalidText))
+            return
+        }
+        writeRemoteInput(frame, completion: completion)
+    }
+
+    func cancelDictation(_ id: UUID) {
+        writeRemoteInput(WatchDictation.cancel(id)) { _ in }
+    }
+
+    private func writeRemoteInput(_ frame: Data, completion: @escaping (Result<Void, WatchInputError>) -> Void) {
         guard let mac, mac.state == .connected, connected else {
             completion(.failure(.disconnected))
             return
@@ -252,17 +270,17 @@ final class Pointer: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
             completion(.failure(.busy))
             return
         }
-        guard payload.count + 1 <= remoteInputWriteLimit else {
+        guard frame.count <= remoteInputWriteLimit else {
             completion(.failure(.tooLong))
             return
         }
         let read = remoteInputRead
         let seal = localInputCipher.map { $0.seal }
-        guard let action = inputExchange.begin(Data([kind]) + payload, hasPairingRead: read != nil, seal: seal) else {
+        guard let action = inputExchange.begin(frame, hasPairingRead: read != nil, seal: seal) else {
             completion(.failure(.busy))
             return
         }
-        pendingRemoteInput = (kind, completion)
+        pendingRemoteInput = (frame[frame.startIndex], completion)
         remoteInputBusy = true
         switch action {
         case .read:
@@ -302,8 +320,12 @@ final class Pointer: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
             finishRemoteInput(.failure(inputAuthenticationFailure), invalidateRead: true)
             return
         }
+        let dictation = WatchDictation.Kind(rawValue: pending.kind)
         guard let attError = error as? CBATTError else {
-            finishRemoteInput(.failure(peripheral.state == .connected ? .failed : .disconnected))
+            let failure: WatchInputError = dictation?.insertsText == true
+                ? .deliveryUnconfirmed
+                : (peripheral.state == .connected ? .failed : .disconnected)
+            finishRemoteInput(.failure(failure))
             return
         }
         let command = WatchInputCommand(rawValue: pending.kind)
@@ -312,10 +334,12 @@ final class Pointer: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
         case .requestNotSupported where localInputCipher != nil: failure = .localProvisioning
         case .insufficientAuthorization: failure = .unauthorized
         case .invalidPdu where pending.kind == remoteInputPairKind: failure = .badCode
-        case .invalidPdu where command?.requiresUpdatedMac == true: failure = .unavailable
+        case .invalidPdu where command?.requiresUpdatedMac == true || (dictation != nil && dictation != .manual): failure = .unavailable
         case .invalidAttributeValueLength: failure = .tooLong
         case .writeNotPermitted: failure = .accessDenied
-        case .unlikelyError where pending.kind == remoteInputTextKind: failure = .needsTextField
+        case .attributeNotFound where dictation == .finish: failure = .staleTextField
+        case .unlikelyError where dictation == .finish: failure = .deliveryUnconfirmed
+        case .unlikelyError where dictation == .manual || dictation == .begin: failure = .needsTextField
         case .unlikelyError where command?.isBrowserTab == true: failure = .needsBrowser
         default: failure = .failed
         }
@@ -440,7 +464,11 @@ final class Pointer: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
     }
 
     private func reset() {
-        let completion = pendingRemoteInput?.completion
+        connectionID = UUID()
+        let pending = pendingRemoteInput
+        let textInFlight = inputExchange.isWriting && pending.flatMap {
+            WatchDictation.Kind(rawValue: $0.kind)
+        }?.insertsText == true
         pendingRemoteInput = nil
         mac = nil
         input = nil
@@ -455,6 +483,6 @@ final class Pointer: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
         pendingScroll = 0
         infoTimer?.invalidate()
         start()
-        completion?(.failure(.disconnected))
+        pending?.completion(.failure(textInFlight ? .deliveryUnconfirmed : .disconnected))
     }
 }

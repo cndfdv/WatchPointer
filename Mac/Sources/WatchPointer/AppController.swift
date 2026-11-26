@@ -10,6 +10,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let bluetoothItem = NSMenuItem()
     private let pairInputItem = NSMenuItem()
     private let forgetInputItem = NSMenuItem()
+    private let smoothingMenu = NSMenu()
+    private var smoothing = UserDefaults.standard.string(forKey: PointerSmoothing.preferenceKey)
+        .flatMap(PointerSmoothing.init(rawValue:)) ?? .balanced
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMenu()
@@ -19,7 +22,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let app = Bundle.main.bundleURL.pathExtension == "app" ? "WatchPointer" : "your terminal app"
             print("Grant Accessibility access to \(app) in System Settings › Privacy & Security › Accessibility.")
         }
-        receiver = Receiver(live: live)
+        receiver = Receiver(live: live, smoothing: smoothing)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -85,6 +88,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         forgetInputItem.action = #selector(forgetWatchInput)
         menu.addItem(forgetInputItem)
 
+        let smoothingItem = NSMenuItem(title: "Pointer Smoothing", action: nil, keyEquivalent: "")
+        for mode in PointerSmoothing.allCases {
+            let option = smoothingMenu.addItem(withTitle: mode.title, action: #selector(selectSmoothing(_:)),
+                                               keyEquivalent: "")
+            option.target = self
+            option.representedObject = mode.rawValue
+            option.state = mode == smoothing ? .on : .off
+        }
+        smoothingItem.submenu = smoothingMenu
+        menu.addItem(smoothingItem)
+
         menu.addItem(.separator())
         let quitItem = menu.addItem(withTitle: "Quit WatchPointer", action: #selector(NSApplication.terminate(_:)),
                                     keyEquivalent: "q")
@@ -121,6 +135,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func forgetWatchInput() {
         receiver?.forgetWatchInput()
+    }
+
+    @objc private func selectSmoothing(_ item: NSMenuItem) {
+        guard let value = item.representedObject as? String,
+              let selected = PointerSmoothing(rawValue: value) else { return }
+        smoothing = selected
+        UserDefaults.standard.set(selected.rawValue, forKey: PointerSmoothing.preferenceKey)
+        receiver?.setPointerSmoothing(selected)
+        for option in smoothingMenu.items {
+            option.state = option == item ? .on : .off
+        }
     }
 
     private func openSettings(_ pane: String) {
