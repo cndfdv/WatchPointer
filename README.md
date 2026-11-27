@@ -83,7 +83,7 @@ The standard build checks the encrypted Bluetooth link before sending a swipe or
 - Swipe **left with one finger** for the next tab or **right** for the previous tab in a supported browser, such as Chrome or Safari.
 - Swipe **left with two fingers** for the next Space or **right** for the previous Space. Spaces include desktops and full-screen windows. This uses macOS’s Control–arrow shortcuts.
 - Swipe **up with two fingers** to open Mission Control. Point at a window and tap the pad to select it. If a two-finger swipe switches a browser tab instead, place both fingertips on the pad before moving them together.
-- Click a text field on the Mac, then tap the **microphone** on the watch pad. Use the watch's system text input and confirm. WatchPointer inserts the result into the field it captured before dictation if that same field is still focused. The session lasts two minutes.
+- Click a text field on the Mac, then tap the **microphone** on the watch pad. Use the watch's system text input and confirm. WatchPointer inserts the result into the field it captured before dictation if that same field is still focused. The session lasts two minutes. In web editors such as the Codex composer, WatchPointer types into the field and checks whether its caret and reported text length reflect the edit.
 - Open **Remote actions** to review an unsent draft. Check the Mac before retrying a draft whose delivery could not be confirmed. For fields that support keyboard input without exposing text insertion to Accessibility, choose **Dictate**, focus the field on your Mac and choose **Send**. System dictation follows the watch's language and dictation settings.
 
 #### Local builds for Bluetooth pairing problems

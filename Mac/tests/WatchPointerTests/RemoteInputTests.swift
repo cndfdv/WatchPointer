@@ -105,6 +105,21 @@ final class RemoteInputTests: XCTestCase {
         XCTAssertEqual(sessions.take(unrelated, now: 156), "new field")
     }
 
+    func testWebDictationRequiresTheExpectedCaretAndTextLength() {
+        let before = DictationEdit(selection: NSRange(location: 3, length: 2), characterCount: 10)
+        let text = "я🙂" // Three UTF-16 units replacing two selected units.
+        let edited = DictationEdit(selection: NSRange(location: 6, length: 0), characterCount: 11)
+        let unexpectedLength = DictationEdit(selection: edited.selection, characterCount: 12)
+        let unchangedCaret = DictationEdit(selection: before.selection, characterCount: 11)
+        let countUnavailable = DictationEdit(selection: edited.selection, characterCount: nil)
+
+        XCTAssertTrue(edited.confirmsInsertion(of: text, into: before))
+        XCTAssertTrue(countUnavailable.confirmsInsertion(of: text, into: before))
+        XCTAssertFalse(before.confirmsInsertion(of: text, into: before))
+        XCTAssertFalse(unexpectedLength.confirmsInsertion(of: text, into: before))
+        XCTAssertFalse(unchangedCaret.confirmsInsertion(of: text, into: before))
+    }
+
     func testLongWriteReassemblesOnlyContiguousFragmentsFromOnePeer() {
         let watch = UUID(), characteristic = UUID()
         let payload = Data([6]) + Data("Привет".utf8)

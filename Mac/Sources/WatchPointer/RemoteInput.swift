@@ -153,12 +153,29 @@ struct FocusedDictationSession<Target> {
     }
 }
 
+struct DictationEdit {
+    let selection: NSRange
+    let characterCount: Int?
+
+    func confirmsInsertion(of text: String, into before: Self) -> Bool {
+        let insertedLength = text.utf16.count
+        guard selection == NSRange(location: before.selection.location + insertedLength, length: 0) else {
+            return false
+        }
+        if let beforeCount = before.characterCount, let characterCount {
+            return characterCount - beforeCount == insertedLength - before.selection.length
+        }
+        return true
+    }
+}
+
 enum RemoteKeyboard {
     enum Result { case accepted, permissionDenied, unavailable, historyUnavailable, focusLost, revoked }
 
     struct DictationTarget {
         let application: NSRunningApplication
         let element: AXUIElement
+        let usesKeyboard: Bool
     }
 
     private static let missionControl = URL(fileURLWithPath: "/System/Applications/Mission Control.app")
@@ -177,7 +194,7 @@ enum RemoteKeyboard {
         case .dictationBegin(let id):
             dictation = FocusedDictationSession()
             guard AXIsProcessTrusted() else { return .permissionDenied }
-            guard let target = focusedDictationTarget() else { return .unavailable }
+            guard let target = focusedDictationTarget(detectWebEditor: true) else { return .unavailable }
             guard stillAuthorized() else { return .revoked }
             dictation.begin(id, target: target, now: ProcessInfo.processInfo.systemUptime)
             return .accepted
@@ -246,7 +263,7 @@ enum RemoteKeyboard {
         return .accepted
     }
 
-    private static func focusedDictationTarget() -> DictationTarget? {
+    private static func focusedDictationTarget(detectWebEditor: Bool = false) -> DictationTarget? {
         guard !IsSecureEventInputEnabled(),
               let application = NSWorkspace.shared.frontmostApplication else { return nil }
 
@@ -254,13 +271,14 @@ enum RemoteKeyboard {
         AXUIElementSetMessagingTimeout(system, 0.3)
         guard let element = focusedElement(in: system), isEditable(element),
               isSettable(kAXSelectedTextAttribute, of: element) else { return nil }
+        let usesKeyboard = detectWebEditor && isInWebEditor(element)
 
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success, pid > 0,
               application.processIdentifier == pid,
               let current = focusedElement(in: system), CFEqual(current, element),
               NSWorkspace.shared.frontmostApplication == application else { return nil }
-        return DictationTarget(application: application, element: element)
+        return DictationTarget(application: application, element: element, usesKeyboard: usesKeyboard)
     }
 
     private static func insertDictation(_ text: String, into target: DictationTarget,
@@ -272,9 +290,71 @@ enum RemoteKeyboard {
               CFEqual(current.element, target.element) else { return .focusLost }
         guard stillAuthorized() else { return .revoked }
 
+        if target.usesKeyboard {
+            return typeDictation(text, into: target, stillAuthorized: stillAuthorized)
+        }
+
         // Insert through the captured AX element so a late focus switch cannot redirect the text.
         return AXUIElementSetAttributeValue(target.element, kAXSelectedTextAttribute as CFString, text as CFString)
             == .success ? .accepted : .unavailable
+    }
+
+    private static func isInWebEditor(_ field: AXUIElement) -> Bool {
+        var node = field
+        for _ in 0..<40 {
+            guard let parent = elementAttribute(kAXParentAttribute, of: node) else { return false }
+            let role = attribute(kAXRoleAttribute, of: parent) as? String
+            if role == "AXWebArea" { return true }
+            if role == kAXWindowRole { return false }
+            node = parent
+        }
+        return false
+    }
+
+    private static func dictationEdit(in field: AXUIElement) -> DictationEdit? {
+        guard let value = attribute(kAXSelectedTextRangeAttribute, of: field),
+              CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let rangeValue = value as! AXValue
+        var selection = CFRange()
+        guard AXValueGetValue(rangeValue, .cfRange, &selection),
+              selection.location >= 0, selection.length >= 0,
+              selection.location <= Int.max - RemoteInputPacket.maximumLength else { return nil }
+        let count = (attribute(kAXNumberOfCharactersAttribute, of: field) as? Int).flatMap { $0 >= 0 ? $0 : nil }
+        return DictationEdit(selection: NSRange(location: selection.location, length: selection.length),
+                             characterCount: count)
+    }
+
+    private static func typeDictation(_ text: String, into target: DictationTarget,
+                                      stillAuthorized: () -> Bool) -> Result {
+        guard CGPreflightPostEventAccess() else { return .permissionDenied }
+        guard let before = dictationEdit(in: target.element) else { return .unavailable }
+
+        let pid = target.application.processIdentifier
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.3)
+        func stillFocused() -> Bool {
+            guard let field = focusedElement(in: system), CFEqual(field, target.element) else { return false }
+            return NSWorkspace.shared.frontmostApplication == target.application && !IsSecureEventInputEnabled()
+        }
+
+        // A web editor can accept an AX setter without updating its document. Send one keyboard edit
+        // and wait for the editor to report the expected caret and length, using only numeric metadata.
+        let sent = postUnicode(text, to: pid) { hasPosted in
+            guard stillFocused() else { return hasPosted ? .unavailable : .focusLost }
+            guard stillAuthorized() else { return hasPosted ? .unavailable : .revoked }
+            return .accepted
+        }
+        guard sent == .accepted else { return sent }
+
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.4
+        repeat {
+            guard stillFocused(), stillAuthorized() else { return .unavailable }
+            if dictationEdit(in: target.element)?.confirmsInsertion(of: text, into: before) == true {
+                return .accepted
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        return .unavailable
     }
 
     private static func isEditable(_ field: AXUIElement) -> Bool {
@@ -288,24 +368,29 @@ enum RemoteKeyboard {
     private static func typeText(_ text: String, stillAuthorized: () -> Bool) -> Result {
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, 0.3)
-        guard let field = focusedElement(in: system),
-              isEditable(field),
-              let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
-        else { return .unavailable }
+        guard let field = focusedElement(in: system), isEditable(field) else { return .unavailable }
 
         var pid: pid_t = 0
         guard AXUIElementGetPid(field, &pid) == .success, pid > 0,
               let current = focusedElement(in: system), CFEqual(current, field),
               !IsSecureEventInputEnabled() else { return .unavailable }
         guard stillAuthorized() else { return .revoked }
+        return postUnicode(text, to: pid) { _ in .accepted }
+    }
+
+    private static func postUnicode(_ text: String, to pid: pid_t,
+                                    beforeChunk: (_ hasPosted: Bool) -> Result) -> Result {
+        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { return .unavailable }
 
         // Quartz may truncate long keyboard payloads. Keep surrogate pairs together across events.
         let characters = Array(text.utf16)
-        characters.withUnsafeBufferPointer { buffer in
-            guard let start = buffer.baseAddress else { return }
+        return characters.withUnsafeBufferPointer { buffer in
+            guard let start = buffer.baseAddress else { return .unavailable }
             var offset = 0
             while offset < buffer.count {
+                let result = beforeChunk(offset > 0)
+                guard result == .accepted else { return result }
                 var end = min(offset + 20, buffer.count)
                 if end < buffer.count, (0xDC00...0xDFFF).contains(buffer[end]) {
                     end -= 1
@@ -317,8 +402,8 @@ enum RemoteKeyboard {
                 }
                 offset = end
             }
+            return .accepted
         }
-        return .accepted
     }
 
     private static func attribute(_ name: String, of element: AXUIElement) -> CFTypeRef? {
